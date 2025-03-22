@@ -1,0 +1,93 @@
+import numpy as np
+import os
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization, Conv1D, MaxPooling1D, Bidirectional
+from tensorflow.keras.optimizers import Adam
+from sklearn.linear_model import Ridge
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+import xgboost as xgb
+
+# Load your processed data
+PROCESSED_DIR = "data/processed_data/"
+X = np.load(os.path.join(PROCESSED_DIR, "X.npy"))
+y = np.load(os.path.join(PROCESSED_DIR, "y.npy"))
+
+# Configuration
+LOOKBACK = 60
+DROPOUT_RATE = 0.3
+LEARNING_RATE = 0.0003
+EPOCHS = 150
+BATCH_SIZE = 32
+BIDIRECTIONAL = True
+LSTM_UNITS = [256, 128, 64]
+
+# Train/test split
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+
+# LSTM Model
+def create_lstm_model(input_shape):
+    model = Sequential()
+    if BIDIRECTIONAL:
+        model.add(Bidirectional(LSTM(LSTM_UNITS[0], return_sequences=True), input_shape=input_shape))
+    else:
+        model.add(LSTM(LSTM_UNITS[0], return_sequences=True, input_shape=input_shape))
+    model.add(Dropout(DROPOUT_RATE))
+    model.add(BatchNormalization())
+    model.add(LSTM(LSTM_UNITS[1], return_sequences=True))
+    model.add(Dropout(DROPOUT_RATE))
+    model.add(BatchNormalization())
+    model.add(LSTM(LSTM_UNITS[2], return_sequences=False))
+    model.add(Dropout(DROPOUT_RATE))
+    model.add(BatchNormalization())
+    model.add(Dense(50, activation='relu'))
+    model.add(Dense(1))
+    model.compile(optimizer=Adam(learning_rate=LEARNING_RATE), loss='mse')
+    return model
+
+# CNN-LSTM Model
+def build_cnn_lstm(input_shape):
+    model = Sequential()
+    model.add(Conv1D(filters=64, kernel_size=3, activation='relu', input_shape=input_shape))
+    model.add(MaxPooling1D(pool_size=2))
+    model.add(LSTM(64))
+    model.add(Dropout(0.3))
+    model.add(Dense(1))
+    model.compile(optimizer='adam', loss='mse')
+    return model
+
+# Initialize models
+lstm_model = create_lstm_model((LOOKBACK, X.shape[2]))
+cnn_lstm_model = build_cnn_lstm((LOOKBACK, X.shape[2]))
+
+# Train models
+lstm_model.fit(X_train, y_train, validation_data=(X_test, y_test), epochs=EPOCHS, batch_size=BATCH_SIZE, verbose=1)
+cnn_lstm_model.fit(X_train, y_train, validation_data=(X_test, y_test), epochs=EPOCHS, batch_size=BATCH_SIZE, verbose=1)
+
+# Train XGBoost on flattened input
+X_train_flat = X_train.reshape(X_train.shape[0], -1)
+X_test_flat = X_test.reshape(X_test.shape[0], -1)
+xgb_model = xgb.XGBRegressor()
+xgb_model.fit(X_train_flat, y_train)
+
+# Predictions
+pred_lstm = lstm_model.predict(X_test)
+pred_cnn = cnn_lstm_model.predict(X_test)
+pred_xgb = xgb_model.predict(X_test_flat).reshape(-1, 1)
+
+# Stack predictions for meta-model
+X_meta = np.concatenate([pred_lstm, pred_cnn, pred_xgb], axis=1)
+
+# Meta-model
+meta_model = Ridge()
+meta_model.fit(X_meta, y_test)
+final_preds = meta_model.predict(X_meta)
+
+# Evaluate
+mse = mean_squared_error(y_test, final_preds)
+mae = mean_absolute_error(y_test, final_preds)
+
+print("📊 Ensemble Performance:")
+print(f"Mean Squared Error: {mse}")
+print(f"Mean Absolute Error: {mae}")
